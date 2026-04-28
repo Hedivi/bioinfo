@@ -72,7 +72,7 @@ def generate_score (scores, ref, pred):
     # Adiciona os valores em suas respectivas listas
     scores["accuracy"].append(acc)
     scores["f1-score"].append(f1)
-    scores["specifity"].append(spe)
+    scores["specificity"].append(spe)
     scores["recall"].append(rec)
     scores["precision"].append(prec)
     scores["roc"].append(roc)

@@ -2,12 +2,12 @@ import torch
 from torch.utils.data import Dataset
 import numpy as np
 import os
-
 from utils import extract_cds_ncds
 from hmm import extract_features
+from sklearn.model_selection import StratifiedKFold
 
 # Define a classe de dataset
-class GenDataset:
+class GenDataset(Dataset):
 
     # Inicializa o dataset
     def __init__ (self, cancer_dir, normal_dir):
@@ -42,7 +42,7 @@ class GenDataset:
                 cds, ncds = extract_cds_ncds(path)
 
                 # Se o comprimento das sequências for igual a zero, continue
-                if len(cds) == 0 and len(ncds) == 0:
+                if len(cds) == 0 or len(ncds) == 0:
                     continue
 
                 # Extrai o vetor de 28 posições das sequências
@@ -61,38 +61,32 @@ class GenDataset:
         return len(self.X)
 
     # Reliza a divisão do dataset em K conjunto. Retorna apenas os índices.
-    def cross_validation_split (self, k=10):
+    def cross_validation_split(self, k=2):
 
-        # Define o tamanho de cada conjunto
-        fold_size = self.len() // k
+        skf = StratifiedKFold(
+            n_splits=k,
+            shuffle=True,
+            random_state=42
+        )
 
-        # Define uma lista de índices
-        indices = np.arrange(self.len())
-
-        # Define a lista de índices, inicialmente vazia
         folds = []
-        # Para cada K
-        for i in range(k):
 
-            # Separa os índices de teste e treino. De teste, é o conjunto atual (i). Para treino, é o resto.
-            test = indices[i * fold_size: (i + 1) * fold_size]
-            train = np.concatenate([indices[:i * fold_size], indices[(i+1) * fold_size:]])
+        for train_index, test_index in skf.split(self.X, self.Y):
+            folds.append((train_index, test_index))
 
-            # Adiciona uma tupla de índices na lista
-            folds.append((train, test))
-
-        # Retorna a lista de índices
         return folds
     
     # Obtém os dados relacionados a uma lista de índices
     def get_fold (self, train_index, test_index):
 
         # Define as listas
-        train_X = [], train_Y = []
-        test_X = [], test_Y = []
+        train_X = []
+        train_Y = []
+        test_X = []
+        test_Y = []
 
         # Para cada dado do dataset
-        for i in range(self.len()):
+        for i in range(len(self)):
 
             # Se o índice estiver presente na lista de índices de treino, adiciona na lista de dados de treino
             if i in train_index:
