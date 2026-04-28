@@ -4,16 +4,9 @@ from sklearn.svm import SVC
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 
-
 import numpy as np
 from Dataset import GenDataset
 from utils import generate_score
-
-
-# Define os diretórios dos dados
-cancer_dir = "../Data/Genbank/Mal_BRCA1"
-normal_dir = "../Data/Genbank/Nao_Mal_BRCA1"
-
 
 # Cria um dicionário vazio de métricas
 def create_score_dict():
@@ -28,19 +21,18 @@ def create_score_dict():
 
 
 # Carrega os dados Genbank
-data = GenDataset(cancer_dir, normal_dir)
+data = GenDataset(
+    cancer_seq_dir="genbank_output/sequences/cancer",
+    normal_seq_dir="genbank_output/sequences/normal",
+)
+data.info()
 
 print("Total de amostras:", len(data))
 print("Formato de X:", data.X.shape)
 print("Formato de Y:", data.Y.shape)
 
-# Verifica se os dados foram carregados corretamente
-if len(data) == 0:
-    print("ERRO - Nenhum dado foi carregado.")
-    exit()
-
 # Consegue os índices de cada fold em relação ao dataset carregado
-folds = data.cross_validation_split(k=2)
+folds = data.cross_validation_split()
 
 # Cria um dicionário de scores para cada modelo
 scores = {
@@ -54,7 +46,7 @@ scores = {
 # O SVM costuma funcionar melhor com dados normalizados
 svm = Pipeline([
     ("scaler", StandardScaler()),
-    ("model", SVC(kernel="rbf"))
+    ("model", SVC(kernel="rbf", probability=True))
 ])
 
 # Define um dicionário de modelos
