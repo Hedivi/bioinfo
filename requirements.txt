@@ -2,3 +2,4 @@ biopython
 torch
 numpy
 scikit-learn
+requests
