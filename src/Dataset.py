@@ -27,14 +27,9 @@ from pathlib import Path
 from Bio import SeqIO
 from torch.utils.data import Dataset
 from sklearn.model_selection import StratifiedKFold
-
-# Importe suas funções — ajuste os caminhos se necessário
 from hmm import extract_features   # extrai vetor de 28 features HMM
 
 
-# ══════════════════════════════════════════════════════
-# FUNÇÕES AUXILIARES
-# ══════════════════════════════════════════════════════
 
 def ler_fasta(caminho: str | Path) -> str:
     """Lê um arquivo FASTA e retorna a sequência como string."""

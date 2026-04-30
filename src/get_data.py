@@ -23,15 +23,14 @@ from Bio import Entrez, SeqIO
 from Bio.SeqRecord import SeqRecord
 import sys
 
-# ─────────────────────────────────────────────
-# CONFIGURAÇÃO  ←  EDITE AQUI
-# ─────────────────────────────────────────────
+
 Entrez.email   = "heloisa.viotto@ufpr.br"
-Entrez.api_key = ""          # gratuito em ncbi.nlm.nih.gov/account (aumenta limite)
-OUTPUT_DIR     = Path("genbank_output")
-DELAY          = 0.4         # segundos entre chamadas
+Entrez.api_key = ""
+OUTPUT_DIR     = Path("../Genbank")
+DELAY          = 0.4                             # segundos entre chamadas. Evita sobrecarga
 INPUT = sys.argv[1]
 
+# Le um arquivo informado como argumento do código python3. E armazena os códigos ID das variantes
 VCV_IDS = []
 with open(INPUT, "r") as f:
     for line in f:
@@ -46,8 +45,8 @@ with open(INPUT, "r") as f:
 # UTILITÁRIOS
 # ══════════════════════════════════════════════
 
-def vcv_para_numero(vcv_id: str) -> str:
-    """'VCV001239650.4' → '1239650'"""
+# A API do clinvar só aceita os números do ID da variante. Sendo assim, precisamos fazer uma limpeza no ID: 'VCV001239650.4' → '1239650'
+def limpeza_vcv(vcv_id: str) -> str:
     return vcv_id.replace("VCV", "").split(".")[0].lstrip("0")
 
 
@@ -68,11 +67,17 @@ def _h() -> dict:
 # PASSO 1 — INFO CLINVAR (3 estratégias)
 # ══════════════════════════════════════════════
 
+# Primeiramente, apenas armazena a númeração do ID da variante em um dicionário.
 def _info_vazia(vcv_numero):
     return {"vcv_numero": vcv_numero, "variante_nome": "",
             "gene_simbolo": "", "gene_id": "", "refseq_ids": []}
 
 
+"""
+Faz uma requisição GET para a API do NCBI pedindo um resumo em JSON. 
+O resultado vem como um dicionário Python. 
+O código navega por dentro desse dicionário buscando os campos genes (símbolo e ID do gene) e sequence_locations dentro de variation_set (os accessions RefSeq)
+"""
 def estrategia_esummary(vcv_numero: str) -> dict:
     """esummary JSON — rápido, retorna dados básicos."""
     r = requests.get(
@@ -82,19 +87,26 @@ def estrategia_esummary(vcv_numero: str) -> dict:
     r.raise_for_status()
     time.sleep(DELAY)
 
+    # Formata a requisição em json
     data   = r.json().get("result", {})
+
+    # Obtem o número da variante
     record = data.get(vcv_numero) or data.get(str(int(vcv_numero)))
     if not record:
         return _info_vazia(vcv_numero)
 
     info = _info_vazia(vcv_numero)
+
+    # Obtem o nome da variante
     info["variante_nome"] = record.get("title", "")
 
+    # Obtem as informações de genes (Simbolo e ID)
     genes = record.get("genes", [])
     if genes:
         info["gene_simbolo"] = genes[0].get("symbol", "")
         info["gene_id"]      = str(genes[0].get("geneid", ""))
 
+    # Capturamos o accessions. Referencia do gene que possui a região codificante e não codificante.
     for vs in record.get("variation_set", []):
         for m in vs.get("measures", []):
             for sl in m.get("sequence_locations", []):
@@ -104,10 +116,13 @@ def estrategia_esummary(vcv_numero: str) -> dict:
     return info
 
 
+
+"""
+Outra forma de obter os dados da variante, porém agora em arquivos XML (linguagem de marcação)
+"""
 def estrategia_efetch_xml(vcv_numero: str) -> dict:
     """
     efetch XML — mais completo.
-    CORREÇÃO: NÃO passar is_varid (causa HTTP 400).
     O id numérico do ClinVar é o mesmo que o UID do banco.
     """
     r = requests.get(
@@ -137,6 +152,7 @@ def estrategia_efetch_xml(vcv_numero: str) -> dict:
     return info
 
 
+#  Usa a API REST mais moderna do ClinVar, que retorna JSON com uma estrutura diferente das outras duas.
 def estrategia_rest_clinvar(vcv_numero: str) -> dict:
     """API REST moderna do ClinVar."""
     r = requests.get(
@@ -330,7 +346,7 @@ def processar_vcv(vcv_id: str, gb_dir: Path, seq_dir: Path) -> dict:
          "num_features_cds": 0, "comprimento_cds": 0,
          "comprimento_ncds": 0, "status": "pendente"}
 
-    vcv_num = vcv_para_numero(vcv_id)
+    vcv_num = limpeza_vcv(vcv_id)
 
     print(f"  [1] Info ClinVar...")
     info = buscar_info_clinvar(vcv_num)
