@@ -1,79 +1,71 @@
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_curve
-from Bio import SeqIO
+"""
+Utilitários de avaliação para classificação binária.
+Implementa as métricas usadas no artigo:
+    accuracy, f1-score, specificity, recall, precision, ROC AUC
+"""
 
-# Extrai as sequência codificantes e não condificantes de um arquivo
-def extract_cds_ncds (file):
+import numpy as np
+from sklearn.metrics import (
+    accuracy_score,
+    f1_score,
+    recall_score,
+    precision_score,
+    roc_auc_score,
+    confusion_matrix,
+)
 
-    # Abre o arquivo
-    record = SeqIO.read(file, "genbank")
 
-    # Seleciona a sequência e coloca em maiúscula
-    seq = str(record.seq).upper()
-    
+def specificity_score(y_true, y_pred) -> float:
+    """
+    Especificidade = TN / (TN + FP)
+    O sklearn não oferece isso diretamente — calculamos via confusion_matrix.
+    """
+    cm = confusion_matrix(y_true, y_pred)
 
-    # Incializa as sequência codificante (string vazia) e uma lista de posições
-    cds_seq = ""
-    cds_pos = []
+    # confusion_matrix para binário retorna [[TN, FP], [FN, TP]]
+    if cm.shape == (2, 2):
+        tn, fp = cm[0, 0], cm[0, 1]
+        return tn / (tn + fp) if (tn + fp) > 0 else 0.0
 
-    # Para cada feature no arquivo
-    for feature in record.features:
+    # Fallback para casos degenerados (fold com só uma classe)
+    return 0.0
 
-        # Se a feature for do tipo CDS (codificante)
-        if feature.type == "CDS":
 
-            # Define o começo e o fim da sequência
-            start = feature.location.start
-            end = feature.location.end
+def generate_score(score_dict: dict, y_true, y_pred, y_prob=None):
+    """
+    Calcula todas as métricas e acumula no dicionário de scores.
 
-            # Concatena o pedaço da sequência codificante 
-            cds_seq += seq[start:end]
+    Args:
+        score_dict : dicionário com listas para cada métrica
+        y_true     : rótulos reais
+        y_pred     : rótulos preditos
+        y_prob     : probabilidades preditas (necessário para ROC AUC)
+                     Se None, ROC não é calculado.
+    """
+    score_dict["accuracy"].append(
+        accuracy_score(y_true, y_pred)
+    )
+    score_dict["f1-score"].append(
+        f1_score(y_true, y_pred, zero_division=0)
+    )
+    score_dict["recall"].append(
+        recall_score(y_true, y_pred, zero_division=0)
+    )
+    score_dict["precision"].append(
+        precision_score(y_true, y_pred, zero_division=0)
+    )
+    score_dict["specificity"].append(
+        specificity_score(y_true, y_pred)
+    )
 
-            # Adiciona a tupla de posições inicial e final
-            cds_pos.append((start, end))
-
-    # Define uma máscara do tamanho da sequência com valores verdadeiros
-    mask = [True] * len(seq)
-
-    # Para cada posição de início e fim das regiões codificantes
-    for start, end in cds_pos:
-
-        # Para cada posição entre start e end
-        for i in range(start, end):
-            # Muda a máscara na posição i para falso
-            mask[i] = False
-
-    # Junta a sequência restante. Se a máscara for positiva, ou seja não está na rgeião codificante, adiciona na sequência não codificante
-    ncds_seq = "".join([seq[i] for i in range(len(seq)) if mask[i]])
-
-    # Retorna as sequências codificantes e não condificantes
-    return cds_seq, ncds_seq
-
-# Calcula as métricas dado uma sequência de valores de referência e um predito
-def generate_score (scores, ref, pred):
-
-    # Calcula a acurácia
-    acc = accuracy_score (ref, pred)
-
-    # Calcula o F1-score
-    f1 = f1_score(ref, pred)
-
-    # Calcula a especificidade
-    spe = recall_score(ref, pred, pos_label=0)
-
-    # Calcula o recall
-    rec = recall_score(ref, pred)
-
-    # Calcula a precisão
-    prec = precision_score(ref, pred)
-
-    # Calcula a curva ROC
-    roc = roc_curve(ref, pred)
-
-    # Adiciona os valores em suas respectivas listas
-    scores["accuracy"].append(acc)
-    scores["f1-score"].append(f1)
-    scores["specificity"].append(spe)
-    scores["recall"].append(rec)
-    scores["precision"].append(prec)
-    scores["roc"].append(roc)
-   
+    # ROC AUC só é calculado se probabilidades forem fornecidas
+    if y_prob is not None:
+        try:
+            score_dict["roc"].append(
+                roc_auc_score(y_true, y_prob)
+            )
+        except ValueError:
+            # Ocorre quando o fold de teste tem só uma classe
+            score_dict["roc"].append(float("nan"))
+    else:
+        score_dict["roc"].append(float("nan"))

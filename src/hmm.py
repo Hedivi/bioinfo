@@ -17,15 +17,8 @@ def initial_prob(seq_completa):
 
 
 def transition_matrix(seq_completa):
-    """
-    Matriz de transição P(i,j) — Equação 5 do artigo.
-    Probabilidade de ir do estado oculto i para o estado oculto j.
-    Ou seja: dado que o nucleotídeo atual é X, qual a chance do próximo ser Y?
-    Calculada na sequência completa (CDS + NCDS juntas).
-    Retorna vetor de 16 valores (matriz 4x4 achatada).
-    """
     matrix = np.zeros((4, 4))
-    count = {n: 0 for n in nucleotides}
+    row_sums = np.zeros(4)
 
     for i in range(len(seq_completa) - 1):
         a, b = seq_completa[i], seq_completa[i + 1]
@@ -33,12 +26,12 @@ def transition_matrix(seq_completa):
             i_idx = nucleotides.index(a)
             j_idx = nucleotides.index(b)
             matrix[i_idx][j_idx] += 1
-            count[a] += 1
+            row_sums[i_idx] += 1
 
-    # Normaliza cada linha pela quantidade de vezes que aquele nucleotídeo aparece
-    for i, n in enumerate(nucleotides):
-        if count[n] > 0:
-            matrix[i] /= count[n]
+    # Normaliza linha a linha (evita divisão por zero)
+    for i in range(4):
+        if row_sums[i] > 0:
+            matrix[i] /= row_sums[i]
 
     return matrix.flatten()
 

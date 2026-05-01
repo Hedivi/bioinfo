@@ -1,337 +1,222 @@
 """
-    VCV ClinVar → GenBank → Extração CDS e NCDS
-    ============================================
-    Replicação do pipeline do artigo:
-    "Cancer detection with various classification models:
-    A comprehensive feature analysis using HMM to extract a nucleotide pattern"
-    Kalal & Jha, Computational Biology and Chemistry, 2024
+get_data_v2.py
+==============
+Coleta múltiplas variantes genômicas (NG_) por gene do GenBank,
+gerando um dataset com várias amostras por gene — igual ao artigo.
 
-    Pipeline do código:
-    -Busca informações sobre cada variante
-    -Encontra o gene associado
-    -Baixa a sequência de DNA no formato GenBank
-    -Separa o DNA em duas partes: CDS e NCDS
-    -Salva tudo organizado em arquivos
+Usa requests diretamente para as chamadas à API do NCBI (mais estável
+que o wrapper Biopython para esearch/esummary).
+
+Saída:
+  genbank/
+    cancer/BRCA1/sequences/
+        NG_005905_2_BRCA1_CDS.fasta
+        NG_005905_2_BRCA1_NCDS.fasta
+        ...
+    nao_cancer/ATM/sequences/
+        ...
 """
 
-import os
 import time
 import csv
 import requests
-import xml.etree.ElementTree as ET
 from pathlib import Path
+from io import StringIO
 from Bio import Entrez, SeqIO
 from Bio.SeqRecord import SeqRecord
 import sys
 
+# ──────────────────────────────────────────────────────────────────────────────
+# CONFIGURAÇÕES
+# ──────────────────────────────────────────────────────────────────────────────
 
-Entrez.email   = "heloisa.viotto@ufpr.br"
-Entrez.api_key = ""
-OUTPUT_DIR     = Path("../Genbank")
-DELAY          = 0.4                             # segundos entre chamadas. Evita sobrecarga
-INPUT = sys.argv[1]
+EMAIL      = "heloisa.viotto@ufpr.br"
+API_KEY    = ""           # recomendado: https://www.ncbi.nlm.nih.gov/account/
 
-nome_input = Path(INPUT).stem
+Entrez.email   = EMAIL    # usado apenas no efetch via Biopython
+Entrez.api_key = API_KEY
 
-if nome_input.startswith("Nao_Mal_"):
-    CLASSE = "nao_cancer"
-    GENE = nome_input.replace("Nao_Mal_", "")
-elif nome_input.startswith("Mal_"):
-    CLASSE = "cancer"
-    GENE = nome_input.replace("Mal_", "")
-else:
-    CLASSE = "desconhecido"
-    GENE = nome_input
+OUTPUT_DIR   = Path("genbank")
+DELAY        = 0.4        # segundos entre chamadas (0.1 com api_key)
+MAX_VARIANTS = 1         # máximo de variantes NG_ por gene
 
-OUTPUT_DIR = Path("../Genbank") / CLASSE / GENE
+BASE_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 
-# Le um arquivo informado como argumento do código python3. E armazena os códigos ID das variantes
-VCV_IDS = []
-with open(INPUT, "r") as f:
-    for line in f:
-        VCV_IDS.append(line.strip())
+# ──────────────────────────────────────────────────────────────────────────────
+# GENES
+# ──────────────────────────────────────────────────────────────────────────────
 
+def get_genes (mal, nao_mal):
 
+    files = [mal, nao_mal]
+    types = ["cancer", "nao_cancer"]
+    genes = []
+    for i in range(len(files)):
+        file = files[i]
+        classe = types[i]
+        with open (file, "r") as f:
+            for line in f:
+                genes.append((line.strip(), classe))
 
+    return genes
 
-# A API do clinvar só aceita os números do ID da variante. Sendo assim, precisamos fazer uma limpeza no ID: 'VCV001239650.4' → '1239650'
-def limpeza_vcv(vcv_id: str) -> str:
-    return vcv_id.replace("VCV", "").split(".")[0].lstrip("0")
+# ──────────────────────────────────────────────────────────────────────────────
+# HELPERS HTTP
+# ──────────────────────────────────────────────────────────────────────────────
 
-
-def _p() -> dict:
-    """Params base para Entrez REST."""
-    p = {"email": Entrez.email}
-    if Entrez.api_key:
-        p["api_key"] = Entrez.api_key
+def _params_base() -> dict:
+    p = {"email": EMAIL}
+    if API_KEY:
+        p["api_key"] = API_KEY
     return p
 
 
-def _h() -> dict:
-    """Headers para requests."""
-    return {"User-Agent": f"Python/vcv_pipeline ({Entrez.email})"}
-
-
-
-# Primeiramente, apenas armazena a númeração do ID da variante em um dicionário.
-def _info_vazia(vcv_numero):
-    return {"vcv_numero": vcv_numero, "variante_nome": "",
-            "gene_simbolo": "", "gene_id": "", "refseq_ids": []}
-
-
-"""
-Faz uma requisição GET para a API do NCBI pedindo um resumo em JSON. 
-O resultado vem como um dicionário Python. 
-O código navega por dentro desse dicionário buscando os campos genes (símbolo e ID do gene) e sequence_locations dentro de variation_set (os accessions RefSeq)
-"""
-def estrategia_esummary(vcv_numero: str) -> dict:
-    print ("Extraindo informações usando o esummary...")
+def _get(endpoint: str, params: dict, timeout: int = 60) -> requests.Response:
+    url = f"{BASE_URL}/{endpoint}"
     r = requests.get(
-        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi",
-        params={**_p(), "db": "clinvar", "id": vcv_numero, "retmode": "json"},
-        headers=_h(), timeout=20)
+        url,
+        params=params,
+        headers={"User-Agent": f"Python/get_data_v2 ({EMAIL})"},
+        timeout=timeout,
+    )
     r.raise_for_status()
     time.sleep(DELAY)
-
-    # Formata a requisição em json
-    data   = r.json().get("result", {})
-
-    # Obtem o número da variante
-    record = data.get(vcv_numero) or data.get(str(int(vcv_numero)))
-    if not record:
-        return _info_vazia(vcv_numero)
-
-    info = _info_vazia(vcv_numero)
-
-    # Obtem o nome da variante
-    info["variante_nome"] = record.get("title", "")
-
-    # Obtem as informações de genes (Simbolo e ID)
-    genes = record.get("genes", [])
-    if genes:
-        info["gene_simbolo"] = genes[0].get("symbol", "")
-        info["gene_id"]      = str(genes[0].get("geneid", ""))
-
-    # Capturamos o accessions. Referencia do gene que possui a região codificante e não codificante.
-    for vs in record.get("variation_set", []):
-        for m in vs.get("measures", []):
-            for sl in m.get("sequence_locations", []):
-                acc = sl.get("accession", "")
-                if acc and acc not in info["refseq_ids"]:
-                    info["refseq_ids"].append(acc)
-    return info
+    return r
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# BUSCA DE VARIANTES NO GENBANK
+# ──────────────────────────────────────────────────────────────────────────────
 
-"""
-Outra forma de obter os dados da variante, porém agora em arquivos XML (linguagem de marcação)
-"""
-def estrategia_efetch_xml(vcv_numero: str) -> dict:
-    print ("Extraindo informações usando o efetch XML...")
-    r = requests.get(
-        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
-        params={**_p(), "db": "clinvar", "id": vcv_numero,
-                "rettype": "vcv", "retmode": "xml"},
-        headers=_h(), timeout=30)
-    r.raise_for_status()
-    time.sleep(DELAY)
+def buscar_uids(accession: str) -> list[str]:
+    params = {
+        **_params_base(),
+        "db": "nuccore",
+        "term": f"{accession}[Accession]",
+        "retmode": "json",
+    }
 
-    root = ET.fromstring(r.text)
-    info = _info_vazia(vcv_numero)
-
-    for e in root.iter("VariationName"):
-        info["variante_nome"] = e.text or ""; break
-    for e in root.iter("Gene"):
-        info["gene_simbolo"] = e.get("Symbol", "")
-        info["gene_id"]      = e.get("GeneID", ""); break
-    for e in root.iter("SequenceLocation"):
-        acc = e.get("Accession", "")
-        if acc and acc not in info["refseq_ids"]:
-            info["refseq_ids"].append(acc)
-    for e in root.iter("HGVSExpression"):
-        acc = e.get("AccessionVersion", "").split(":")[0]
-        if acc and acc not in info["refseq_ids"]:
-            info["refseq_ids"].append(acc)
-    return info
-
-
-#  Usa a API REST mais moderna do ClinVar, que retorna JSON com uma estrutura diferente das outras duas.
-def estrategia_rest_clinvar(vcv_numero: str) -> dict:
-    print ("Extraindo informações usando o rest_clinvar...")
-    r = requests.get(
-        "https://clinvar.ncbi.nlm.nih.gov/api/rest/vcv",
-        params={"variation_id": vcv_numero, "format": "json"},
-        headers=_h(), timeout=20)
-    r.raise_for_status()
-    time.sleep(DELAY)
-
+    r = _get("esearch.fcgi", params)
     data = r.json()
-    info = _info_vazia(vcv_numero)
-    info["variante_nome"] = data.get("variation_name", "")
-
-    for g in data.get("genes", []):
-        info["gene_simbolo"] = g.get("symbol", "")
-        info["gene_id"]      = str(g.get("gene_id", "")); break
-
-    for allele in [data.get("variation", {})]:
-        if not allele: continue
-        for loc in allele.get("allele", {}).get("sequence_locations", []):
-            acc = loc.get("accession", "")
-            if acc and acc not in info["refseq_ids"]:
-                info["refseq_ids"].append(acc)
-    return info
+    ids = data.get("esearchresult", {}).get("idlist", [])
+    return ids
 
 
-"""
-Tenta buscar as informações do ClinVar por 3 estratégias diferentes para código númerico da Variante.
-Se tiver Genes e Accessions retorna automaticamente.
-"""
-def buscar_info_clinvar(vcv_numero: str) -> dict:
-    estrategias = [
-        ("esummary",   estrategia_esummary),
-        ("efetch XML", estrategia_efetch_xml),
-        ("REST API",   estrategia_rest_clinvar),
-    ]
-    ultimo_erro = None
-    for nome, fn in estrategias:
+def uid_para_accession(uid: str) -> str:
+    """Converte um UID numérico no accession correspondente (ex: NG_005905.2)."""
+    params = {
+        **_params_base(),
+        "db":      "nuccore",
+        "id":      uid,
+        "retmode": "json",
+    }
+    r = _get("esummary.fcgi", params)
+    result = r.json().get("result", {})
+    return result.get(uid, {}).get("accessionversion", "")
+
+
+def buscar_accessions(simbolo: str) -> list[str]:
+    """
+    Retorna lista de accessions NG_ disponíveis para o gene.
+    """
+    print(f"  Buscando variantes de {simbolo}...")
+
+    try:
+        uids = buscar_uids(simbolo)
+    except Exception as e:
+        print(f"  [Erro] esearch falhou para {simbolo}: {e}")
+        return []
+
+    if not uids:
+        print(f"  [Aviso] Nenhuma entrada encontrada para {simbolo}.")
+        return []
+
+    accessions = []
+    for uid in uids:
         try:
-            print(f"    → {nome}...")
-            info = fn(vcv_numero)
-            if info.get("gene_simbolo") or info.get("refseq_ids"):
-                print(f"    ✓ Sucesso com {nome}")
-                return info
-            print(f"    ✗ {nome}: dados insuficientes")
-        except requests.HTTPError as e:
-            print(f"    ✗ {nome}: HTTP {e.response.status_code}")
-            ultimo_erro = e
-        except Exception as e:
-            print(f"    ✗ {nome}: {e}")
-            ultimo_erro = e
-
-    raise RuntimeError(f"Todas as estratégias falharam. Último erro: {ultimo_erro}")
-
-
-
-# Percorre por todos os prefixos de accessions
-def priorizar_refseq(ids: list) -> str | None:
-    for pref in ["NG_", "NM_", "NR_", "NC_"]:
-        for acc in ids:
-            if acc.startswith(pref):
-                return acc
-    return ids[0] if ids else None
-
-
-# Procura outra forma de conseguir o accession que comece com NG
-def buscar_ng_via_elink(gene_id: str) -> str | None:
-    if not gene_id: return None
-    try:
-        r = requests.get(
-            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi",
-            params={**_p(), "dbfrom": "gene", "db": "nuccore", "id": gene_id,
-                    "linkname": "gene_nuccore_refseqgene", "retmode": "json"},
-            headers=_h(), timeout=20)
-        r.raise_for_status(); time.sleep(DELAY)
-
-        uids = []
-        for ls in r.json().get("linksets", []):
-            for lsdb in ls.get("linksetdbs", []):
-                for lk in lsdb.get("links", []):
-                    uids.append(str(lk))
-        if not uids: return None
-
-        r2 = requests.get(
-            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
-            params={**_p(), "db": "nuccore", "id": uids[0],
-                    "rettype": "acc", "retmode": "text"},
-            headers=_h(), timeout=20)
-        r2.raise_for_status(); time.sleep(DELAY)
-
-        acc = r2.text.strip()
-        if acc.startswith("NG_"):
-            print(f"    ✓ NG_ via elink: {acc}")
-            return acc
-    except Exception as e:
-        print(f"    ✗ elink falhou: {e}")
-    return None
-
-
-# Procura outra forma de conseguir o accession que comece com NG
-def buscar_ng_via_esearch(simbolo: str) -> str | None:
-    if not simbolo: return None
-    try:
-        r = requests.get(
-            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
-            params={**_p(), "db": "nuccore", "retmax": 5, "retmode": "json",
-                    "term": f"{simbolo}[GENE] AND RefSeqGene[KEYWORD] AND Homo sapiens[ORGN]"},
-            headers=_h(), timeout=20)
-        r.raise_for_status(); time.sleep(DELAY)
-
-        ids = r.json().get("esearchresult", {}).get("idlist", [])
-        for uid in ids[:5]:
-            r2 = requests.get(
-                "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
-                params={**_p(), "db": "nuccore", "id": uid,
-                        "rettype": "acc", "retmode": "text"},
-                headers=_h(), timeout=20)
-            r2.raise_for_status(); time.sleep(DELAY)
-            acc = r2.text.strip()
+            acc = uid_para_accession(uid)
             if acc.startswith("NG_"):
-                print(f"    ✓ NG_ via esearch: {acc}")
-                return acc
-    except Exception as e:
-        print(f"    ✗ esearch falhou: {e}")
-    return None
+                accessions.append(acc)
+        except Exception as e:
+            print(f"  [Aviso] Falha ao converter UID {uid}: {e}")
+
+    accessions = uids
+
+    print(f"  ✓ {len(accessions)} accessions NG_ encontrados")
+    return accessions
 
 
-"""
-Tenta 3 maneiras de conseguir o accession, caso ele não consiga código do acession da variante, 
-ele tenta por outros meios como pelo ID do gene...
-"""
-def resolver_accession(info: dict) -> str | None:
-    acc = priorizar_refseq(info["refseq_ids"])
-    if acc and acc.startswith("NG_"):
-        return acc
-    # Tentar obter NG_ de outras formas
-    ng = (buscar_ng_via_elink(info["gene_id"])
-          or buscar_ng_via_esearch(info["gene_simbolo"]))
-    return ng or acc   # fallback para o que tiver
+# ──────────────────────────────────────────────────────────────────────────────
+# DOWNLOAD DO GENBANK
+# ──────────────────────────────────────────────────────────────────────────────
 
-
-# Realiza o download do accession no formato GenBank
-def baixar_genbank(accession: str, caminho: Path) -> SeqRecord:
+def baixar_genbank(accession: str, caminho: Path) -> SeqRecord | None:
+    """Baixa um registro GenBank usando requests, com cache local."""
     if caminho.exists():
-        print(f"    → Cache: {caminho.name}")
-        return SeqIO.read(caminho, "genbank")
+        try:
+            return SeqIO.read(str(caminho), "genbank")
+        except Exception:
+            caminho.unlink()
 
-    print(f"    → Baixando: {accession}...")
-    r = requests.get(
-        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
-        params={**_p(), "db": "nuccore", "id": accession,
-                "rettype": "gb", "retmode": "text"},
-        headers=_h(), timeout=120)
-    r.raise_for_status(); time.sleep(DELAY)
+    try:
+        params = {
+            **_params_base(),
+            "db":      "nuccore",
+            "id":      accession,
+            "rettype": "gb",
+            "retmode": "text",
+        }
+        r = _get("efetch.fcgi", params, timeout=120)
+        caminho.write_text(r.text, encoding="utf-8")
 
-    caminho.write_text(r.text, encoding="utf-8")
-    print(f"    ✓ Salvo: {caminho.name}")
-    return SeqIO.read(caminho, "genbank")
+        record = SeqIO.read(str(caminho), "genbank")
+        print(f"    ✓ {accession}: {len(record.seq):,} bp")
+        return record
+
+    except Exception as e:
+        print(f"    [Erro] Download {accession}: {e}")
+        if caminho.exists():
+            caminho.unlink()
+        return None
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# EXTRAÇÃO CDS / NCDS
+# ──────────────────────────────────────────────────────────────────────────────
 
-# Captura as regiões de introns e excns (Regiões codificantes e não codificantes)
-def extrair_cds_ncds(record: SeqRecord) -> tuple:
-    seq       = str(record.seq).upper()
-    pos_cds   = set()
-    n_features = 0
+def extrair_cds_ncds(record: SeqRecord) -> tuple[str, str]:
+    """
+    Extrai CDS (exons concatenados) e NCDS (introns + flanqueadoras).
+    Retorna ("", "") se o registro não for adequado.
+    """
+    acc = record.id
+    mol = record.annotations.get("molecule_type", "").lower()
+
+    if "rna" in mol or acc.startswith("NM_") or acc.startswith("NR_"):
+        return "", ""
+
+    seq     = str(record.seq).upper()
+    pos_cds = set()
 
     for feat in record.features:
         if feat.type == "CDS":
-            n_features += 1
             for parte in feat.location.parts:
                 pos_cds.update(range(int(parte.start), int(parte.end)))
 
+    if not pos_cds:
+        return "", ""
+
     cds  = "".join(seq[i] for i in sorted(pos_cds))
     ncds = "".join(seq[i] for i in range(len(seq)) if i not in pos_cds)
-    return cds, ncds, n_features
+
+    if not cds or not ncds:
+        return "", ""
+
+    # Descarta se >95% é CDS — suspeito de mRNA
+    if len(cds) / len(seq) > 0.95:
+        return "", ""
+
+    return cds, ncds
 
 
 def salvar_fasta(caminho: Path, seq: str, header: str):
@@ -341,124 +226,97 @@ def salvar_fasta(caminho: Path, seq: str, header: str):
             f.write(seq[i:i+80] + "\n")
 
 
-# Responsavel por todo o pipeline
-def processar_vcv(vcv_id: str, gb_dir: Path, seq_dir: Path) -> dict:
-    
-    # Cria o dicionário de resultado com todos os campos já inicializados
-    # como vazios ou zero. Isso garante que mesmo se der erro no meio do
-    # caminho, o dicionário terá todos os campos esperados para o CSV final.
-    r = {"vcv_id": vcv_id, "variante_nome": "", "gene_simbolo": "",
-         "accession_usado": "", "comprimento_total": 0,
-         "num_features_cds": 0, "comprimento_cds": 0,
-         "comprimento_ncds": 0, "status": "pendente"}
+# ──────────────────────────────────────────────────────────────────────────────
+# PIPELINE POR GENE
+# ──────────────────────────────────────────────────────────────────────────────
 
-    # Converte o VCV ID do formato "VCV001239650.4" para o número limpo
-    # "1239650", que é o formato aceito pelas APIs do NCBI.
-    vcv_num = limpeza_vcv(vcv_id)
+def processar_gene(simbolo: str, classe: str) -> list[dict]:
+    print(f"\n{'─'*60}")
+    print(f"  {simbolo} | {classe}")
+    print(f"{'─'*60}")
 
-    # ETAPA 1: busca informações sobre a variante no ClinVar.
-    # A função tenta 3 estratégias diferentes (esummary, efetch XML e REST API)
-    # e retorna a primeira que trouxer dados úteis como gene e accessions.
-    print(f"  [1] Info ClinVar...")
-    info = buscar_info_clinvar(vcv_num)
-    
-    # Salva o nome da variante e o símbolo do gene no dicionário de resultado.
-    r["variante_nome"] = info["variante_nome"]
-    r["gene_simbolo"]  = info["gene_simbolo"]
-    print(f"      Gene: {info['gene_simbolo']} | {info['variante_nome']}")
-    print(f"      RefSeqs: {info['refseq_ids']}")
+    base_dir = OUTPUT_DIR / classe / simbolo
+    gb_dir   = base_dir / "genbank_files"
+    seq_dir  = base_dir / "sequences"
+    gb_dir.mkdir(parents=True, exist_ok=True)
+    seq_dir.mkdir(parents=True, exist_ok=True)
 
-    # ETAPA 2: decide qual accession GenBank será usado para baixar a sequência.
-    # O script prioriza NG_ (gene completo), mas se não encontrar tenta via
-    # elink e esearch. Se nada funcionar, usa qualquer accession disponível.
-    print(f"  [2] Resolvendo accession...")
-    acc = resolver_accession(info)
-    
-    # Se não foi encontrado nenhum accession por nenhuma das estratégias,
-    # registra o erro no dicionário e encerra o processamento desse VCV.
-    if not acc:
-        r["status"] = "erro: sem accession"
-        return r
-    
-    r["accession_usado"] = acc
-    print(f"      → {acc}")
+    accessions = buscar_accessions(simbolo)
+    if not accessions:
+        return []
 
-    # ETAPA 3: baixa o arquivo GenBank do accession encontrado.
-    # Os pontos no VCV ID e no accession são trocados por underscores
-    # para evitar problemas no nome do arquivo em diferentes sistemas.
-    # Se o arquivo já tiver sido baixado antes, usa o cache local.
-    print(f"  [3] GenBank...")
-    nome_gb = f"{vcv_id.replace('.','_')}_{acc.replace('.','_')}.gb"
-    record  = baixar_genbank(acc, gb_dir / nome_gb)
-    
-    # Registra o tamanho total da sequência em pares de base (bp).
-    r["comprimento_total"] = len(record.seq)
-    print(f"      {len(record.seq):,} bp")
+    resultados = []
+    for acc in accessions:
+        nome_gb = f"{acc.replace('.', '_')}.gb"
+        record  = baixar_genbank(acc, gb_dir / nome_gb)
+        if record is None:
+            continue
 
-    # ETAPA 4: percorre as anotações do arquivo GenBank para identificar
-    # quais posições do DNA pertencem a regiões CDS (codificantes).
-    # O restante das posições é classificado como NCDS (não-codificante).
-    print(f"  [4] Extraindo CDS/NCDS...")
-    cds, ncds, n = extrair_cds_ncds(record)
-    
-    # Atualiza o dicionário de resultado com as estatísticas da extração:
-    # quantidade de features CDS encontradas e tamanho em nucleotídeos
-    # de cada região.
-    r.update({"num_features_cds": n, "comprimento_cds": len(cds),
-               "comprimento_ncds": len(ncds)})
-    print(f"      CDS: {len(cds):,} nt | NCDS: {len(ncds):,} nt | features: {n}")
+        cds, ncds = extrair_cds_ncds(record)
+        if not cds:
+            print(f"    [Ignorado] {acc}: CDS/NCDS inválido")
+            continue
 
-    # Monta o nome base dos arquivos FASTA usando o VCV ID e o símbolo do gene.
-    # Salva dois arquivos: um com a sequência CDS e outro com a sequência NCDS.
-    # O cabeçalho de cada FASTA identifica a origem: VCV, gene e accession usado.
-    base = f"{vcv_id.replace('.','_')}_{info['gene_simbolo']}"
-    salvar_fasta(seq_dir / f"{base}_CDS.fasta",  cds,
-                 f"{vcv_id} | {info['gene_simbolo']} | {acc} | CDS")
-    salvar_fasta(seq_dir / f"{base}_NCDS.fasta", ncds,
-                 f"{vcv_id} | {info['gene_simbolo']} | {acc} | NCDS")
+        base = f"{acc.replace('.', '_')}_{simbolo}"
+        salvar_fasta(seq_dir / f"{base}_CDS.fasta",  cds,  f"{acc}|{simbolo}|CDS")
+        salvar_fasta(seq_dir / f"{base}_NCDS.fasta", ncds, f"{acc}|{simbolo}|NCDS")
 
-    # Marca o processamento como bem-sucedido e retorna o dicionário completo
-    # com todas as informações coletadas para esse VCV ID.
-    r["status"] = "ok"
-    return r
+        resultados.append({
+            "gene":      simbolo,
+            "classe":    classe,
+            "accession": acc,
+            "len_total": len(record.seq),
+            "len_cds":   len(cds),
+            "len_ncds":  len(ncds),
+        })
 
+    print(f"  → {len(resultados)}/{len(accessions)} variantes salvas para {simbolo}")
+    return resultados
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ──────────────────────────────────────────────────────────────────────────────
 
 def main():
     OUTPUT_DIR.mkdir(exist_ok=True)
-    gb_dir  = OUTPUT_DIR / "genbank_files";  gb_dir.mkdir(exist_ok=True)
-    seq_dir = OUTPUT_DIR / "sequences";      seq_dir.mkdir(exist_ok=True)
+    todos = []
 
-    resultados = []
-    for vcv_id in VCV_IDS:
-        print(f"\n{'='*60}\n  {vcv_id}\n{'='*60}")
+    GENES = get_genes(sys.argv[1], sys.argv[2])
+
+    for (simbolo, classe) in GENES:
         try:
-            res = processar_vcv(vcv_id, gb_dir, seq_dir)
+            resultados = processar_gene(simbolo, classe)
+            todos.extend(resultados)
         except Exception as e:
-            print(f"  ERRO: {e}")
-            res = {k: "" for k in ["vcv_id","variante_nome","gene_simbolo",
-                   "accession_usado","comprimento_total","num_features_cds",
-                   "comprimento_cds","comprimento_ncds"]}
-            res["vcv_id"]  = vcv_id
-            res["status"]  = f"erro: {e}"
-        resultados.append(res)
+            print(f"\n  [ERRO] {simbolo}: {e}")
 
-    csv_path = OUTPUT_DIR / "resumo.csv"
-    with open(csv_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=list(resultados[0].keys()))
-        writer.writeheader()
-        writer.writerows(resultados)
+    if todos:
+        csv_path = Path("variantes.csv")
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(todos[0].keys()))
+            writer.writeheader()
+            writer.writerows(todos)
+        print(f"\nCSV salvo: {csv_path}")
 
-    print(f"\n{'='*75}\nRESUMO\n{'='*75}")
-    print(f"{'VCV ID':<26} {'Gene':<8} {'Accession':<16} "
-          f"{'Total':>9} {'CDS':>9} {'NCDS':>9}  Status")
-    print("-" * 90)
-    for res in resultados:
-        print(f"{res['vcv_id']:<26} {res['gene_simbolo']:<8} "
-              f"{res['accession_usado']:<16} "
-              f"{str(res['comprimento_total']):>9} "
-              f"{str(res['comprimento_cds']):>9} "
-              f"{str(res['comprimento_ncds']):>9}  {res['status']}")
-    print(f"\n→ Arquivos: {OUTPUT_DIR.resolve()}")
+    cancer     = [r for r in todos if r["classe"] == "cancer"]
+    nao_cancer = [r for r in todos if r["classe"] == "nao_cancer"]
+
+    print(f"\n{'='*60}")
+    print(f"RESUMO FINAL")
+    print(f"{'='*60}")
+    print(f"  Total de amostras : {len(todos)}")
+    print(f"  Malignas          : {len(cancer)}")
+    print(f"  Não-malignas      : {len(nao_cancer)}")
+    print()
+
+    from collections import Counter
+    por_gene = Counter(r["gene"] for r in todos)
+    print(f"  {'Gene':<10} {'Classe':<12} {'Amostras':>10}")
+    print(f"  {'-'*34}")
+    for (simbolo, classe) in GENES:
+        n = por_gene.get(simbolo, 0)
+        print(f"  {simbolo:<10} {classe:<12} {n:>10}")
 
 
 if __name__ == "__main__":
